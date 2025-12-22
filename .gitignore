@@ -1,0 +1,24 @@
+# WireGuard keys and configs (sensitive)
+*.key
+*.conf
+!server/*/wireguard-setup.sh
+!client/*.sh
+
+# SSH keys
+*.pub
+id_*
+
+# macOS
+.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.log
+
