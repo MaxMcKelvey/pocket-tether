@@ -60,6 +60,9 @@ SERVER_ZSHRC=""
 SERVER_WG_DIR=""
 SERVER_WG_CONFIG=""
 
+# Track if key auth is working
+KEY_AUTH_WORKING=false
+
 # Function to run command on server
 ssh_cmd() {
     local cmd="$1"
@@ -71,12 +74,20 @@ ssh_cmd() {
             -o PubkeyAuthentication=no \
             -o StrictHostKeyChecking=no \
             "$SERVER_USER@$SERVER_HOST" "$cmd"
+    elif [ "$KEY_AUTH_WORKING" = "true" ]; then
+        # Key auth is known to work, use it
+        ssh -o StrictHostKeyChecking=no \
+            -i "$CLIENT_KEY" \
+            "$SERVER_USER@$SERVER_HOST" "$cmd"
     else
         # Try with key first, fall back to password
         if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+               -i "$CLIENT_KEY" \
                "$SERVER_USER@$SERVER_HOST" "echo" 2>/dev/null; then
             # Key auth works
+            KEY_AUTH_WORKING=true
             ssh -o StrictHostKeyChecking=no \
+                -i "$CLIENT_KEY" \
                 "$SERVER_USER@$SERVER_HOST" "$cmd"
         else
             # Fall back to password
@@ -175,37 +186,108 @@ setup_client_ssh_key() {
     else
         log_info "SSH key already exists: $CLIENT_KEY"
     fi
+    
+    # Ensure correct permissions on client key
+    chmod 600 "$CLIENT_KEY" 2>/dev/null || true
+    chmod 644 "$CLIENT_PUBKEY" 2>/dev/null || true
+    
+    log_info "Client SSH key ready: $CLIENT_KEY"
 }
 
 # Add SSH key to server
 add_key_to_server() {
     log_step "Adding SSH key to server..."
     
+    if [ ! -f "$CLIENT_PUBKEY" ]; then
+        log_error "SSH public key not found: $CLIENT_PUBKEY"
+        return 1
+    fi
+    
     local pubkey_content=$(cat "$CLIENT_PUBKEY")
     
-    # Check if key already exists
-    if ssh_cmd "grep -qF '${pubkey_content}' '$SERVER_AUTH_KEYS' 2>/dev/null || true" 2>/dev/null; then
+    # Check if key already exists (using password auth since we're setting up key auth)
+    log_info "Checking if key already exists on server..."
+    local key_exists=$(ssh -o PreferredAuthentications=keyboard-interactive,password \
+                          -o PubkeyAuthentication=no \
+                          -o StrictHostKeyChecking=no \
+                          "$SERVER_USER@$SERVER_HOST" \
+                          "test -f '$SERVER_AUTH_KEYS' && grep -qF '${pubkey_content}' '$SERVER_AUTH_KEYS' 2>/dev/null && echo 'yes' || echo 'no'" 2>/dev/null || echo "no")
+    
+    if [ "$key_exists" = "yes" ]; then
         log_info "SSH key already in server's authorized_keys"
-        return 0
+        # Verify it actually works
+        if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+               -o IdentitiesOnly=yes \
+               -i "$CLIENT_KEY" \
+               "$SERVER_USER@$SERVER_HOST" "echo 'key works'" 2>/dev/null; then
+            log_info "SSH key authentication verified"
+            return 0
+        else
+            log_warn "Key exists but authentication failed, re-adding..."
+        fi
     fi
     
     log_info "Adding SSH key to server's authorized_keys..."
     
-    # Create .ssh directory if it doesn't exist
-    ssh_cmd "mkdir -p '$SERVER_SSH_DIR' && chmod 700 '$SERVER_SSH_DIR'"
+    # Create .ssh directory if it doesn't exist (using password auth)
+    ssh -o PreferredAuthentications=keyboard-interactive,password \
+        -o PubkeyAuthentication=no \
+        -o StrictHostKeyChecking=no \
+        "$SERVER_USER@$SERVER_HOST" \
+        "mkdir -p '$SERVER_SSH_DIR' && chmod 700 '$SERVER_SSH_DIR'" 2>/dev/null
     
-    # Append key to authorized_keys
-    ssh_cmd "echo '$pubkey_content' >> '$SERVER_AUTH_KEYS' && chmod 600 '$SERVER_AUTH_KEYS'"
+    # Append key to authorized_keys and set proper permissions
+    # Use a here-doc to avoid shell escaping issues
+    ssh -o PreferredAuthentications=keyboard-interactive,password \
+        -o PubkeyAuthentication=no \
+        -o StrictHostKeyChecking=no \
+        "$SERVER_USER@$SERVER_HOST" \
+        "echo '$pubkey_content' >> '$SERVER_AUTH_KEYS' && chmod 600 '$SERVER_AUTH_KEYS' && chown \$(whoami) '$SERVER_AUTH_KEYS' 2>/dev/null || true" 2>/dev/null
+    
+    # Verify the key was added
+    local verify_key=$(ssh -o PreferredAuthentications=keyboard-interactive,password \
+                          -o PubkeyAuthentication=no \
+                          -o StrictHostKeyChecking=no \
+                          "$SERVER_USER@$SERVER_HOST" \
+                          "grep -qF '${pubkey_content}' '$SERVER_AUTH_KEYS' 2>/dev/null && echo 'yes' || echo 'no'" 2>/dev/null || echo "no")
+    
+    if [ "$verify_key" != "yes" ]; then
+        log_error "Failed to add SSH key to server"
+        return 1
+    fi
     
     log_info "SSH key added successfully"
     
-    # Test the new key
+    # Test the new key - use IdentitiesOnly to force using our key
+    log_info "Testing SSH key authentication..."
     sleep 1
-    if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+    
+    # Try with explicit key file
+    if ssh -o BatchMode=yes \
+           -o ConnectTimeout=5 \
+           -o IdentitiesOnly=yes \
+           -i "$CLIENT_KEY" \
+           -o StrictHostKeyChecking=no \
            "$SERVER_USER@$SERVER_HOST" "echo 'key works'" 2>/dev/null; then
-        log_info "SSH key authentication verified"
+        log_info "SSH key authentication verified successfully!"
+        return 0
     else
-        log_warn "SSH key added but verification failed (may need to retry)"
+        # Try without explicit key (should use default location)
+        if ssh -o BatchMode=yes \
+               -o ConnectTimeout=5 \
+               -o StrictHostKeyChecking=no \
+               "$SERVER_USER@$SERVER_HOST" "echo 'key works'" 2>/dev/null; then
+            log_info "SSH key authentication verified successfully!"
+            return 0
+        else
+            log_warn "SSH key added but authentication test failed"
+            log_info "This might be due to:"
+            log_info "  1. Server SSH config not allowing key authentication"
+            log_info "  2. Key permissions issue on server"
+            log_info "  3. SSH daemon needs to be restarted"
+            log_info "Try manually: ssh -i $CLIENT_KEY $SERVER_USER@$SERVER_HOST"
+            return 1
+        fi
     fi
 }
 
@@ -484,7 +566,30 @@ main() {
     detect_server_paths
     
     # Add key to server (will prompt for password if needed)
-    add_key_to_server
+    if add_key_to_server; then
+        KEY_AUTH_WORKING=true
+        log_info "SSH key setup successful - subsequent commands will use key authentication"
+    else
+        log_error "SSH key setup failed. Continuing with password authentication..."
+        log_info "Troubleshooting steps:"
+        log_info "  1. Verify key was added: ssh $SERVER_USER@$SERVER_HOST 'cat ~/.ssh/authorized_keys'"
+        log_info "  2. Check permissions: ssh $SERVER_USER@$SERVER_HOST 'ls -la ~/.ssh/'"
+        log_info "  3. Test manually: ssh -i $CLIENT_KEY $SERVER_USER@$SERVER_HOST"
+    fi
+    
+    # Verify server SSH config allows key authentication (only if we can connect)
+    if [ "$KEY_AUTH_WORKING" = "true" ] || ssh_cmd "true" 2>/dev/null; then
+        log_step "Verifying server SSH configuration..."
+        local pubkey_auth=$(ssh_cmd "sudo grep -E '^PubkeyAuthentication|^#PubkeyAuthentication' /etc/ssh/sshd_config 2>/dev/null | tail -1" 2>/dev/null || echo "")
+        if echo "$pubkey_auth" | grep -qE "PubkeyAuthentication\s+no"; then
+            log_warn "Server SSH config has PubkeyAuthentication=no"
+            log_info "Attempting to enable it (requires sudo password)..."
+            ssh_cmd "sudo sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && sudo systemctl restart sshd 2>/dev/null || sudo service ssh restart 2>/dev/null || true" 2>/dev/null || \
+            log_warn "Could not update SSH config automatically. Please enable PubkeyAuthentication manually."
+        elif [ -n "$pubkey_auth" ]; then
+            log_info "Server SSH config allows key authentication: $pubkey_auth"
+        fi
+    fi
     
     # Install WireGuard on server
     install_wireguard_server
@@ -503,6 +608,20 @@ main() {
     
     echo ""
     log_info "Remote setup complete!"
+    echo ""
+    
+    # Final verification
+    if [ "$KEY_AUTH_WORKING" = "true" ]; then
+        log_info "✓ SSH key authentication is working"
+        log_info "  You can now connect without a password using:"
+        log_info "  ssh $SERVER_USER@$SERVER_HOST"
+    else
+        log_warn "⚠ SSH key authentication may not be working"
+        log_info "  To troubleshoot, try:"
+        log_info "  ssh -v -i $CLIENT_KEY $SERVER_USER@$SERVER_HOST"
+        log_info "  Check server logs: sudo tail -f /var/log/auth.log"
+    fi
+    
     echo ""
     log_info "Next steps:"
     log_info "1. Source your .bashrc: source ~/.bashrc"
