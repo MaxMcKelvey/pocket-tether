@@ -37,6 +37,31 @@ This approach leverages:
 
 ### Server Setup
 
+You have two options for setting up the server:
+
+#### Option 1: Remote Setup from Termux (Recommended for Linux)
+
+This method allows you to set up the Linux server remotely from your Termux client. It automatically handles SSH key setup, WireGuard installation, and configuration synchronization.
+
+**Prerequisites**: SSH access to the server (password authentication is fine, the script will set up key-based auth)
+
+```bash
+# From Termux, after basic client setup
+cd client
+bash remote-setup.sh user@your-server-ip
+```
+
+This will:
+1. Generate SSH key on client if needed
+2. Add SSH key to server's `authorized_keys`
+3. Install WireGuard on the server
+4. Configure WireGuard server
+5. Sync `pocket-tether.sh` script to server
+6. Sync environment variables to server (`.bashrc` and `.zshrc`)
+7. Update client `.bashrc` with synced values
+
+#### Option 2: Manual Server Setup
+
 #### macOS
 ```bash
 cd server/macos
@@ -62,6 +87,17 @@ This will:
 # Clone or copy the repository to your phone
 cd client
 bash termux-setup.sh
+```
+
+This will:
+1. Install required packages (WireGuard, OpenSSH, tmux)
+2. Set up the pocket-tether scripts
+3. Configure your shell rc file
+4. Generate SSH keys
+
+**After basic setup, you can use remote setup** (see Server Setup above):
+```bash
+bash remote-setup.sh user@your-server-ip
 ```
 
 #### Generic Unix (macOS, Linux, etc.)
