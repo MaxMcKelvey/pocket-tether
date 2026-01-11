@@ -63,6 +63,62 @@ SERVER_WG_CONFIG=""
 # Track if key auth is working
 KEY_AUTH_WORKING=false
 
+# Sudo password (will be prompted if needed)
+SUDO_PASSWORD=""
+SUDO_PASSWORDLESS=false
+
+# Check if passwordless sudo is available
+check_sudo_access() {
+    log_step "Checking sudo access..."
+    
+    if ssh_cmd "sudo -n true 2>/dev/null"; then
+        SUDO_PASSWORDLESS=true
+        log_info "Passwordless sudo is available"
+        return 0
+    else
+        SUDO_PASSWORDLESS=false
+        log_info "Passwordless sudo not available, will prompt for password"
+        return 1
+    fi
+}
+
+# Prompt for sudo password
+get_sudo_password() {
+    if [ "$SUDO_PASSWORDLESS" = "true" ]; then
+        return 0
+    fi
+    
+    if [ -z "$SUDO_PASSWORD" ]; then
+        echo ""
+        log_info "Sudo access is required for server setup"
+        read -sp "Enter sudo password for $SERVER_USER@$SERVER_HOST: " SUDO_PASSWORD
+        echo ""
+        
+        # Test the password
+        if ! echo "$SUDO_PASSWORD" | ssh_cmd "sudo -S -v" 2>/dev/null; then
+            log_error "Invalid sudo password"
+            SUDO_PASSWORD=""
+            return 1
+        fi
+        
+        log_info "Sudo password verified"
+    fi
+}
+
+# Function to run sudo command on server
+sudo_cmd() {
+    local cmd="$1"
+    
+    if [ "$SUDO_PASSWORDLESS" = "true" ]; then
+        # Passwordless sudo
+        ssh_cmd "sudo $cmd"
+    else
+        # Use sudo -S to read password from stdin
+        get_sudo_password || return 1
+        echo "$SUDO_PASSWORD" | ssh_cmd "sudo -S $cmd"
+    fi
+}
+
 # Function to run command on server
 ssh_cmd() {
     local cmd="$1"
@@ -303,8 +359,16 @@ install_wireguard_server() {
     
     log_info "Installing WireGuard..."
     
-    # Detect OS and install
-    ssh_cmd "if [ -f /etc/os-release ]; then . /etc/os-release; \
+    # Detect OS and install using interactive sudo
+    # Use ssh -t to allocate pseudo-terminal for sudo password prompt
+    local ssh_opts="-t -o StrictHostKeyChecking=no"
+    if [ "$KEY_AUTH_WORKING" = "true" ]; then
+        ssh_opts="$ssh_opts -i $CLIENT_KEY"
+    else
+        ssh_opts="$ssh_opts -o PreferredAuthentications=keyboard-interactive,password -o PubkeyAuthentication=no"
+    fi
+    
+    local install_cmd="if [ -f /etc/os-release ]; then . /etc/os-release; \
         if [ \"\$ID\" = 'ubuntu' ] || [ \"\$ID\" = 'debian' ]; then \
             sudo apt-get update && sudo apt-get install -y wireguard wireguard-tools; \
         elif [ \"\$ID\" = 'fedora' ] || [ \"\$ID\" = 'rhel' ] || [ \"\$ID\" = 'centos' ]; then \
@@ -317,6 +381,8 @@ install_wireguard_server() {
     else \
         echo 'Cannot detect OS, please install WireGuard manually'; \
     fi"
+    
+    ssh $ssh_opts "$SERVER_USER@$SERVER_HOST" "$install_cmd"
     
     # Verify installation
     if ssh_cmd "command -v wg >/dev/null 2>&1"; then
@@ -334,8 +400,16 @@ setup_wireguard_server() {
     local wg_interface="wg0"
     local wg_port="51820"
     
+    # Helper function for interactive sudo commands
+    local ssh_sudo_opts="-t -o StrictHostKeyChecking=no"
+    if [ "$KEY_AUTH_WORKING" = "true" ]; then
+        ssh_sudo_opts="$ssh_sudo_opts -i $CLIENT_KEY"
+    else
+        ssh_sudo_opts="$ssh_sudo_opts -o PreferredAuthentications=keyboard-interactive,password -o PubkeyAuthentication=no"
+    fi
+    
     # Check if config already exists
-    if ssh_cmd "sudo test -f '$SERVER_WG_CONFIG'" 2>/dev/null; then
+    if ssh $ssh_sudo_opts "$SERVER_USER@$SERVER_HOST" "sudo test -f '$SERVER_WG_CONFIG'" 2>/dev/null; then
         log_warn "WireGuard config already exists at $SERVER_WG_CONFIG"
         log_info "Skipping WireGuard server setup (already configured)"
         return 0
@@ -344,7 +418,7 @@ setup_wireguard_server() {
     log_info "Creating WireGuard server configuration..."
     
     # Create WireGuard directory
-    ssh_cmd "sudo mkdir -p '$SERVER_WG_DIR'"
+    ssh $ssh_sudo_opts "$SERVER_USER@$SERVER_HOST" "sudo mkdir -p '$SERVER_WG_DIR'"
     
     # Generate server keys
     log_info "Generating server keys..."
@@ -352,12 +426,14 @@ setup_wireguard_server() {
     local server_public=$(ssh_cmd "echo '$server_private' | wg pubkey")
     
     # Save private key on server
-    ssh_cmd "echo '$server_private' | sudo tee '$SERVER_WG_DIR/server_private.key' > /dev/null && \
-             sudo chmod 600 '$SERVER_WG_DIR/server_private.key'"
+    ssh $ssh_sudo_opts "$SERVER_USER@$SERVER_HOST" \
+        "echo '$server_private' | sudo tee '$SERVER_WG_DIR/server_private.key' > /dev/null && \
+         sudo chmod 600 '$SERVER_WG_DIR/server_private.key'"
     
     # Save public key on server
-    ssh_cmd "echo '$server_public' | sudo tee '$SERVER_WG_DIR/server_public.key' > /dev/null && \
-             sudo chmod 644 '$SERVER_WG_DIR/server_public.key'"
+    ssh $ssh_sudo_opts "$SERVER_USER@$SERVER_HOST" \
+        "echo '$server_public' | sudo tee '$SERVER_WG_DIR/server_public.key' > /dev/null && \
+         sudo chmod 644 '$SERVER_WG_DIR/server_public.key'"
     
     # Get server external IP (try multiple methods)
     local external_ip=$(ssh_cmd "curl -s --max-time 5 ifconfig.me 2>/dev/null || \
@@ -391,12 +467,14 @@ PostDown = iptables -D FORWARD -i $wg_interface -j ACCEPT; iptables -D FORWARD -
     rm "$temp_config"
     
     # Move to final location with sudo
-    ssh_cmd "sudo mv /tmp/wg0.conf '$SERVER_WG_CONFIG' && sudo chmod 600 '$SERVER_WG_CONFIG'"
+    ssh $ssh_sudo_opts "$SERVER_USER@$SERVER_HOST" \
+        "sudo mv /tmp/wg0.conf '$SERVER_WG_CONFIG' && sudo chmod 600 '$SERVER_WG_CONFIG'"
     
     # Enable IP forwarding
     log_info "Enabling IP forwarding..."
-    ssh_cmd "echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf > /dev/null && \
-             sudo sysctl -p > /dev/null 2>&1 || true"
+    ssh $ssh_sudo_opts "$SERVER_USER@$SERVER_HOST" \
+        "echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf > /dev/null && \
+         sudo sysctl -p > /dev/null 2>&1 || true"
     
     log_info "WireGuard server configured"
     log_info "Server public key: $server_public"
@@ -580,11 +658,21 @@ main() {
     # Verify server SSH config allows key authentication (only if we can connect)
     if [ "$KEY_AUTH_WORKING" = "true" ] || ssh_cmd "true" 2>/dev/null; then
         log_step "Verifying server SSH configuration..."
-        local pubkey_auth=$(ssh_cmd "sudo grep -E '^PubkeyAuthentication|^#PubkeyAuthentication' /etc/ssh/sshd_config 2>/dev/null | tail -1" 2>/dev/null || echo "")
+        local ssh_sudo_opts="-t -o StrictHostKeyChecking=no"
+        if [ "$KEY_AUTH_WORKING" = "true" ]; then
+            ssh_sudo_opts="$ssh_sudo_opts -i $CLIENT_KEY"
+        else
+            ssh_sudo_opts="$ssh_sudo_opts -o PreferredAuthentications=keyboard-interactive,password -o PubkeyAuthentication=no"
+        fi
+        
+        local pubkey_auth=$(ssh $ssh_sudo_opts "$SERVER_USER@$SERVER_HOST" \
+            "sudo grep -E '^PubkeyAuthentication|^#PubkeyAuthentication' /etc/ssh/sshd_config 2>/dev/null | tail -1" 2>/dev/null || echo "")
         if echo "$pubkey_auth" | grep -qE "PubkeyAuthentication\s+no"; then
             log_warn "Server SSH config has PubkeyAuthentication=no"
             log_info "Attempting to enable it (requires sudo password)..."
-            ssh_cmd "sudo sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && sudo systemctl restart sshd 2>/dev/null || sudo service ssh restart 2>/dev/null || true" 2>/dev/null || \
+            ssh $ssh_sudo_opts "$SERVER_USER@$SERVER_HOST" \
+                "sudo sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
+                 sudo systemctl restart sshd 2>/dev/null || sudo service ssh restart 2>/dev/null || true" 2>/dev/null || \
             log_warn "Could not update SSH config automatically. Please enable PubkeyAuthentication manually."
         elif [ -n "$pubkey_auth" ]; then
             log_info "Server SSH config allows key authentication: $pubkey_auth"
