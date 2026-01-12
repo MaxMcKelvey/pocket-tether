@@ -30,13 +30,22 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Check if WireGuard is available
+# Check if WireGuard Android app is available
 check_wg() {
-    if ! command -v wg &> /dev/null; then
-        log_error "WireGuard (wg) command not found. Please install WireGuard."
-        return 1
+    # Check if WireGuard app is installed (via Android package manager)
+    if command -v pm &> /dev/null; then
+        if pm list packages | grep -q "com.wireguard.android"; then
+            return 0
+        fi
     fi
-    return 0
+    # Fallback: check if config exists (app might be installed but pm not available)
+    if [ -f "$WG_CONFIG" ]; then
+        log_warn "WireGuard Android app status unknown. Ensure the app is installed and config is imported."
+        return 0
+    fi
+    log_error "WireGuard Android app not found. Please install from Google Play Store."
+    log_info "Install: https://play.google.com/store/apps/details?id=com.wireguard.android"
+    return 1
 }
 
 # Check if SSH is available
@@ -48,7 +57,7 @@ check_ssh() {
     return 0
 }
 
-# Initialize WireGuard interface
+# Open WireGuard config in Android app
 wg_up() {
     if ! check_wg; then
         return 1
@@ -56,64 +65,49 @@ wg_up() {
 
     if [ ! -f "$WG_CONFIG" ]; then
         log_error "WireGuard config not found at $WG_CONFIG"
-        log_info "Please copy your WireGuard config to $WG_CONFIG"
+        log_info "Please generate config using: bash setup-wireguard-client.sh user@server"
         return 1
     fi
 
-    # Check if interface is already up
-    if ip link show "$WG_INTERFACE" &> /dev/null 2>&1 || ifconfig "$WG_INTERFACE" &> /dev/null 2>&1; then
-        log_warn "WireGuard interface $WG_INTERFACE is already up"
-        return 0
-    fi
-
-    log_info "Bringing up WireGuard interface $WG_INTERFACE..."
+    log_info "Opening WireGuard Android app..."
+    log_info "Please enable the VPN connection in the WireGuard app."
     
-    # Try wg-quick if available (preferred method)
-    if command -v wg-quick &> /dev/null; then
-        sudo wg-quick up "$WG_CONFIG" 2>&1 | grep -v "Warning" || true
+    # Try to open the WireGuard app
+    if command -v am &> /dev/null; then
+        # Try to open WireGuard app
+        am start -n com.wireguard.android/.ui.MainActivity 2>/dev/null || \
+        log_info "Please open the WireGuard app manually and enable the connection."
     else
-        # Fallback to manual setup
-        sudo wg setconf "$WG_INTERFACE" "$WG_CONFIG" || {
-            log_error "Failed to configure WireGuard interface"
-            return 1
-        }
-        # Bring interface up (platform-specific)
-        if command -v ip &> /dev/null; then
-            sudo ip link set "$WG_INTERFACE" up
-        elif command -v ifconfig &> /dev/null; then
-            sudo ifconfig "$WG_INTERFACE" up
-        fi
+        log_info "Please open the WireGuard app manually:"
+        log_info "1. Open WireGuard app"
+        log_info "2. Import the config from: $WG_CONFIG"
+        log_info "3. Enable the VPN connection"
     fi
-
-    log_info "WireGuard interface $WG_INTERFACE is up"
+    
+    log_info "Config file location: $WG_CONFIG"
+    log_info "You can import this config in the WireGuard app via:"
+    log_info "  - QR code (use: qrencode -t ansiutf8 < $WG_CONFIG)"
+    log_info "  - File import (copy to Downloads folder and import)"
+    
     return 0
 }
 
-# Tear down WireGuard interface
+# Disable WireGuard VPN in Android app
 wg_down() {
     if ! check_wg; then
         return 1
     fi
 
-    if ! ip link show "$WG_INTERFACE" &> /dev/null 2>&1 && ! ifconfig "$WG_INTERFACE" &> /dev/null 2>&1; then
-        log_warn "WireGuard interface $WG_INTERFACE is not up"
-        return 0
-    fi
-
-    log_info "Bringing down WireGuard interface $WG_INTERFACE..."
+    log_info "Please disable the VPN connection in the WireGuard Android app."
     
-    if command -v wg-quick &> /dev/null; then
-        sudo wg-quick down "$WG_CONFIG" 2>&1 | grep -v "Warning" || true
+    # Try to open the WireGuard app
+    if command -v am &> /dev/null; then
+        am start -n com.wireguard.android/.ui.MainActivity 2>/dev/null || \
+        log_info "Please open the WireGuard app manually to disable the connection."
     else
-        if command -v ip &> /dev/null; then
-            sudo ip link set "$WG_INTERFACE" down
-        elif command -v ifconfig &> /dev/null; then
-            sudo ifconfig "$WG_INTERFACE" down
-        fi
-        sudo wg-quick down "$WG_INTERFACE" 2>&1 | grep -v "Warning" || true
+        log_info "Open the WireGuard app and disable the VPN connection."
     fi
-
-    log_info "WireGuard interface $WG_INTERFACE is down"
+    
     return 0
 }
 
@@ -123,12 +117,33 @@ wg_status() {
         return 1
     fi
 
-    if ip link show "$WG_INTERFACE" &> /dev/null 2>&1 || ifconfig "$WG_INTERFACE" &> /dev/null 2>&1; then
-        log_info "WireGuard interface $WG_INTERFACE status:"
-        wg show "$WG_INTERFACE" 2>/dev/null || log_warn "Interface exists but wg show failed"
-    else
-        log_warn "WireGuard interface $WG_INTERFACE is not up"
+    # Check if config exists
+    if [ ! -f "$WG_CONFIG" ]; then
+        log_warn "WireGuard config not found at $WG_CONFIG"
         return 1
+    fi
+
+    log_info "WireGuard Android app status:"
+    log_info "Config file: $WG_CONFIG"
+    
+    # Try to check if VPN is active via Android API
+    if command -v dumpsys &> /dev/null; then
+        local vpn_status=$(dumpsys connectivity | grep -i "wireguard" || echo "")
+        if [ -n "$vpn_status" ]; then
+            log_info "VPN appears to be active (check WireGuard app to confirm)"
+        else
+            log_warn "VPN status unknown. Check WireGuard app to see if connection is active."
+        fi
+    else
+        log_info "Please check the WireGuard Android app to see connection status."
+        log_info "The app will show if the VPN is connected."
+    fi
+    
+    # Show config info
+    if [ -f "$WG_CONFIG" ]; then
+        log_info ""
+        log_info "Config details:"
+        grep -E "^Address|^Endpoint" "$WG_CONFIG" 2>/dev/null || true
     fi
 }
 
@@ -138,15 +153,16 @@ pt_connect() {
         return 1
     fi
 
-    # Ensure WireGuard is up
-    if ! wg_status &> /dev/null; then
-        log_info "WireGuard not up, attempting to bring it up..."
-        wg_up || {
-            log_error "Failed to bring up WireGuard. Cannot connect."
-            return 1
-        }
-        sleep 2
+    # Check if WireGuard config exists
+    if [ ! -f "$WG_CONFIG" ]; then
+        log_error "WireGuard config not found at $WG_CONFIG"
+        log_info "Please generate config using: bash setup-wireguard-client.sh user@server"
+        return 1
     fi
+    
+    # Warn if VPN might not be active (we can't reliably check from Termux)
+    log_warn "Ensure WireGuard VPN is enabled in the Android app before connecting."
+    log_info "If connection fails, check that the VPN is active in WireGuard app."
 
     log_info "Connecting to $SERVER_SSH_USER@$SERVER_SSH_HOST:$SERVER_SSH_PORT..."
 
@@ -205,11 +221,14 @@ pocket-tether - Remote development setup commands
 
 Commands:
   pt_setup          - Initialize pocket-tether environment
-  wg_up             - Bring up WireGuard interface
-  wg_down           - Bring down WireGuard interface
-  wg_status         - Show WireGuard connection status
+  wg_up             - Open WireGuard Android app (enable VPN manually in app)
+  wg_down           - Open WireGuard Android app (disable VPN manually in app)
+  wg_status         - Show WireGuard config location and status info
   pt_connect / pt   - Connect to remote server via SSH with tmux
   pt_help           - Show this help message
+
+Note: WireGuard is managed via the Android app, not command-line tools.
+      Use the WireGuard app to enable/disable the VPN connection.
 
 Configuration (set in your shell rc file):
   POCKET_TETHER_DIR - Directory for pocket-tether files (default: ~/.pocket-tether)

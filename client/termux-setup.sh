@@ -20,12 +20,17 @@ fi
 echo "Installing required packages..."
 pkg update -y
 pkg install -y \
-    wireguard-tools \
     openssh \
     tmux \
     git \
     curl \
-    bash
+    bash \
+    qrencode
+
+echo ""
+echo "Note: WireGuard is managed via the Android app, not Termux packages."
+echo "Please install the WireGuard app from Google Play Store:"
+echo "  https://play.google.com/store/apps/details?id=com.wireguard.android"
 
 # Create pocket-tether directory
 mkdir -p "$POCKET_TETHER_DIR"
@@ -65,12 +70,14 @@ echo ""
 echo "Setup complete!"
 echo ""
 echo "Next steps:"
-echo "1. Copy your WireGuard client config to: $POCKET_TETHER_DIR/wg0.conf"
-echo "2. Configure server connection variables in ~/.bashrc:"
+echo "1. Install WireGuard Android app from Google Play Store"
+echo "2. Generate WireGuard config: bash setup-wireguard-client.sh user@server"
+echo "3. Import config into WireGuard app (QR code or file import)"
+echo "4. Configure server connection variables in ~/.bashrc:"
 echo "   export SERVER_WG_IP='10.0.0.1'"
 echo "   export SERVER_SSH_HOST='10.0.0.1'"
 echo "   export SERVER_SSH_USER='your-username'"
-echo "3. Restart Termux or run: source ~/.bashrc"
-echo "4. Run 'pt_setup' to verify configuration"
-echo "5. Run 'pt' or 'pt_connect' to connect to your server"
+echo "5. Restart Termux or run: source ~/.bashrc"
+echo "6. Enable VPN in WireGuard app"
+echo "7. Run 'pt' or 'pt_connect' to connect to your server"
 

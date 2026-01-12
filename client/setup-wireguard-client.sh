@@ -282,6 +282,19 @@ PersistentKeepalive = 25
     rm "$temp_config"
     
     log_info "Client configuration written to: $CLIENT_WG_CONFIG"
+    
+    # Generate QR code for Android app import
+    if command -v qrencode &> /dev/null; then
+        log_info ""
+        log_info "QR Code for WireGuard Android app:"
+        echo ""
+        qrencode -t ansiutf8 < "$CLIENT_WG_CONFIG"
+        echo ""
+        log_info "Scan this QR code with the WireGuard Android app to import the config."
+    else
+        log_warn "qrencode not found. Install with: pkg install qrencode"
+        log_info "You can still import the config file manually."
+    fi
 }
 
 # Main flow
@@ -315,10 +328,26 @@ main() {
     log_info "Client IP: $CLIENT_IP"
     log_info "Server endpoint: $SERVER_EXTERNAL_IP:$SERVER_WG_PORT"
     echo ""
-    log_info "Next steps:"
-    log_info "1. Source your .bashrc: source ~/.bashrc"
-    log_info "2. Bring up WireGuard: wg_up"
-    log_info "3. Connect to server: pt_connect or pt"
+    log_info "Next steps to import into WireGuard Android app:"
+    echo ""
+    log_info "Option 1: QR Code (Easiest)"
+    log_info "  1. Open WireGuard Android app"
+    log_info "  2. Tap the '+' button"
+    log_info "  3. Select 'Create from QR code'"
+    log_info "  4. Scan the QR code shown above"
+    echo ""
+    log_info "Option 2: File Import"
+    log_info "  1. Copy config to Downloads folder:"
+    log_info "     cp $CLIENT_WG_CONFIG ~/storage/downloads/pocket-tether.conf"
+    log_info "  2. Open WireGuard Android app"
+    log_info "  3. Tap the '+' button"
+    log_info "  4. Select 'Create from file or archive'"
+    log_info "  5. Navigate to Downloads and select pocket-tether.conf"
+    echo ""
+    log_info "After importing:"
+    log_info "  1. Enable the VPN connection in WireGuard app"
+    log_info "  2. Source your .bashrc: source ~/.bashrc"
+    log_info "  3. Connect to server: pt_connect or pt"
 }
 
 # Run main function
